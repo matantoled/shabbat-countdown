@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shabbat Countdown</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #000;
+      color: #fff;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    body {
+      display: grid;
+      place-items: center;
+    }
+    #countdown {
+      direction: ltr;
+      unicode-bidi: bidi-override;
+      font-size: clamp(32px, 8vw, 72px);
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+  </style>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="countdown">...</div>
+
+  <script>
+    const JERUSALEM_GEONAME_ID = 281184;
+    const TZ = "Asia/Jerusalem";
+
+    function setText(txt) {
+      document.getElementById("countdown").textContent = txt;
+    }
+
+    function getJerusalemDateParts(dateObj) {
+      // Returns { y, m, d } for the date in Asia/Jerusalem (even if the device is in another timezone)
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: TZ,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).formatToParts(dateObj);
+
+      const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+      return { y: Number(map.year), m: Number(map.month), d: Number(map.day) };
+    }
+
+    async function fetchCandlesDate(extraParams = {}) {
+      const url = new URL("https://www.hebcal.com/shabbat");
+      url.searchParams.set("cfg", "json");
+      url.searchParams.set("geonameid", String(JERUSALEM_GEONAME_ID));
+      url.searchParams.set("M", "on");
+      url.searchParams.set("b", "40");
+      url.searchParams.set("leyning", "off");
+
+      for (const [k, v] of Object.entries(extraParams)) {
+        url.searchParams.set(k, String(v));
+      }
+
+      const res = await fetch(url.toString(), { cache: "no-store" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+
+      const candles = Array.isArray(data.items)
+        ? data.items.find(it => it && it.category === "candles" && it.date)
+        : null;
+
+      if (!candles) throw new Error("No candles item");
+      const target = new Date(candles.date);
+      if (Number.isNaN(target.getTime())) throw new Error("Bad date format");
+      return target;
+    }
+
+    function formatDiff(ms) {
+      const totalMinutes = Math.floor(ms / 60000);
+      const days = Math.floor(totalMinutes / (60 * 24));
+      const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+      const minutes = totalMinutes % 60;
+      return `${days}d ${hours}h ${minutes}m`;
+    }
+
+    async function main() {
+      try {
+        const now = new Date();
+
+        // 1) Try "this week's" candle lighting
+        let target = await fetchCandlesDate();
+
+        // 2) If already passed, ask for a date 7 days ahead (computed in Asia/Jerusalem)
+        if (target.getTime() <= now.getTime()) {
+          const plus7 = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+          const { y, m, d } = getJerusalemDateParts(plus7);
+          target = await fetchCandlesDate({ gy: y, gm: m, gd: d });
+        }
+
+        const diff = target.getTime() - now.getTime();
+        if (diff <= 0) {
+          setText("ERROR");
+          return;
+        }
+
+        setText(formatDiff(diff));
+      } catch (e) {
+        setText("ERROR");
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>
