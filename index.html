@@ -24,64 +24,34 @@
       letter-spacing: 0.5px;
     }
   </style>
-<script type="importmap">
-{
-  "imports": {
-    "react": "https://esm.sh/react@^19.2.4",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
-    "react/": "https://esm.sh/react@^19.2.4/"
-  }
-}
-</script>
 </head>
 <body>
   <div id="countdown">...</div>
 
   <script>
-    const JERUSALEM_GEONAME_ID = 281184;
     const TZ = "Asia/Jerusalem";
+    const JERUSALEM_GEONAME_ID = 281184;
 
     function setText(txt) {
       document.getElementById("countdown").textContent = txt;
     }
 
-    function getJerusalemDateParts(dateObj) {
-      // Returns { y, m, d } for the date in Asia/Jerusalem (even if the device is in another timezone)
-      const parts = new Intl.DateTimeFormat("en-CA", {
+    function isoDateInIsrael(dateObj) {
+      // YYYY-MM-DD in Asia/Jerusalem (even if device timezone differs)
+      return new Intl.DateTimeFormat("en-CA", {
         timeZone: TZ,
         year: "numeric",
         month: "2-digit",
         day: "2-digit"
-      }).formatToParts(dateObj);
-
-      const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
-      return { y: Number(map.year), m: Number(map.month), d: Number(map.day) };
+      }).format(dateObj);
     }
 
-    async function fetchCandlesDate(extraParams = {}) {
-      const url = new URL("https://www.hebcal.com/shabbat");
-      url.searchParams.set("cfg", "json");
-      url.searchParams.set("geonameid", String(JERUSALEM_GEONAME_ID));
-      url.searchParams.set("M", "on");
-      url.searchParams.set("b", "40");
-      url.searchParams.set("leyning", "off");
-
-      for (const [k, v] of Object.entries(extraParams)) {
-        url.searchParams.set(k, String(v));
-      }
-
-      const res = await fetch(url.toString(), { cache: "no-store" });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const data = await res.json();
-
-      const candles = Array.isArray(data.items)
-        ? data.items.find(it => it && it.category === "candles" && it.date)
-        : null;
-
-      if (!candles) throw new Error("No candles item");
-      const target = new Date(candles.date);
-      if (Number.isNaN(target.getTime())) throw new Error("Bad date format");
-      return target;
+    function weekdayInIsrael(dateObj) {
+      // "Fri", "Sat", ...
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: TZ,
+        weekday: "short"
+      }).format(dateObj);
     }
 
     function formatDiff(ms) {
@@ -92,26 +62,68 @@
       return `${days}d ${hours}h ${minutes}m`;
     }
 
+    async function fetchJsonWithRetry(url, tries = 3) {
+      let lastErr;
+      for (let i = 0; i < tries; i++) {
+        try {
+          const res = await fetch(url, { cache: "no-store" });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return await res.json();
+        } catch (e) {
+          lastErr = e;
+          await new Promise(r => setTimeout(r, 400));
+        }
+      }
+      throw lastErr;
+    }
+
+    async function getNextFridayCandles() {
+      const now = new Date();
+
+      // request a safe window (next 14 days)
+      const start = isoDateInIsrael(now);
+      const end = isoDateInIsrael(new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000));
+
+      const url = new URL("https://www.hebcal.com/hebcal");
+      url.searchParams.set("v", "1");
+      url.searchParams.set("cfg", "json");
+      url.searchParams.set("start", start);
+      url.searchParams.set("end", end);
+
+      url.searchParams.set("c", "on");        // include candle lighting times
+      url.searchParams.set("b", "40");        // 40 minutes before sunset
+      url.searchParams.set("M", "on");        // include related zmanim (safe to keep)
+      url.searchParams.set("leyning", "off"); // keep response smaller
+
+      url.searchParams.set("geo", "geoname");
+      url.searchParams.set("geonameid", String(JERUSALEM_GEONAME_ID));
+      url.searchParams.set("i", "on");        // Israel scheme
+
+      const data = await fetchJsonWithRetry(url.toString(), 3);
+      if (!Array.isArray(data.items)) throw new Error("No items");
+
+      // "candles" can appear for Erev Chag too; we want Shabbat -> Friday candles
+      const candidates = data.items
+        .filter(it => it && it.category === "candles" && it.date)
+        .map(it => new Date(it.date))
+        .filter(d => !Number.isNaN(d.getTime()))
+        .filter(d => weekdayInIsrael(d) === "Fri")
+        .sort((a, b) => a.getTime() - b.getTime());
+
+      const next = candidates.find(d => d.getTime() > now.getTime());
+      if (!next) throw new Error("No upcoming Friday candles in range");
+      return next;
+    }
+
     async function main() {
       try {
         const now = new Date();
-
-        // 1) Try "this week's" candle lighting
-        let target = await fetchCandlesDate();
-
-        // 2) If already passed, ask for a date 7 days ahead (computed in Asia/Jerusalem)
-        if (target.getTime() <= now.getTime()) {
-          const plus7 = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-          const { y, m, d } = getJerusalemDateParts(plus7);
-          target = await fetchCandlesDate({ gy: y, gm: m, gd: d });
-        }
-
+        const target = await getNextFridayCandles();
         const diff = target.getTime() - now.getTime();
         if (diff <= 0) {
           setText("ERROR");
           return;
         }
-
         setText(formatDiff(diff));
       } catch (e) {
         setText("ERROR");
